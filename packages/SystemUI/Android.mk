@@ -34,6 +34,8 @@ LOCAL_SRC_FILES := \
     $(call all-Iaidl-files-under, src) \
     $(call all-Iaidl-files-under, $(RELATIVE_FINGERPRINT_PATH))
 
+LOCAL_SRC_FILES += $(call all-java-files-under, ../../../../packages/apps/DUI/src)
+
 LOCAL_STATIC_ANDROID_LIBRARIES := \
     SystemUIPluginLib \
     SystemUISharedLib \
@@ -50,7 +52,7 @@ LOCAL_STATIC_ANDROID_LIBRARIES := \
     android-slices-view \
     android-slices-builders \
     android-arch-core-runtime \
-    android-arch-lifecycle-extensions \
+    android-arch-lifecycle-extensions 
 
 LOCAL_STATIC_JAVA_LIBRARIES := \
     SystemUI-tags \
@@ -58,17 +60,20 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
     org.lineageos.platform.internal
 
 LOCAL_JAVA_LIBRARIES := telephony-common \
-    android.car
+    android.car \
+    trail-drawing \
+    rebound
 
+LOCAL_JAVA_LIBRARIES := telephony-common
+LOCAL_JAVA_LIBRARIES += android.car
+LOCAL_JAVA_LIBRARIES += org.dirtyunicorns.utils
 LOCAL_PACKAGE_NAME := SystemUI
 LOCAL_PRIVATE_PLATFORM_APIS := true
 LOCAL_CERTIFICATE := platform
 LOCAL_PRIVILEGED_MODULE := true
-
 LOCAL_FULL_LIBS_MANIFEST_FILES := $(LOCAL_PATH)/LineageManifest.xml
-
 LOCAL_PROGUARD_FLAG_FILES := proguard.flags
-LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/res-keyguard $(LOCAL_PATH)/res
+LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/res-keyguard $(LOCAL_PATH)/res packages/apps/SlimRecents/res packages/apps/DUI/res
 
 ifneq ($(INCREMENTAL_BUILDS),)
     LOCAL_PROGUARD_ENABLED := disabled

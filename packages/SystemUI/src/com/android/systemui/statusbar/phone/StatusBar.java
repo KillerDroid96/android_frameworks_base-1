@@ -91,6 +91,7 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Process;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
@@ -143,6 +144,12 @@ import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.statusbar.NotificationVisibility;
 import com.android.internal.statusbar.StatusBarIcon;
+import com.android.internal.util.NotificationMessagingUtil;
+import com.android.internal.utils.du.ActionConstants;
+import com.android.internal.utils.du.DUActionUtils;
+import com.android.internal.utils.du.DUPackageMonitor;
+import com.android.internal.utils.du.DUPackageMonitor.PackageChangedListener;
+import com.android.internal.utils.du.DUPackageMonitor.PackageState;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.internal.widget.MessagingGroup;
 import com.android.internal.widget.MessagingMessage;
@@ -176,6 +183,7 @@ import com.android.systemui.fragments.FragmentHostManager;
 import com.android.systemui.keyguard.KeyguardViewMediator;
 import com.android.systemui.keyguard.ScreenLifecycle;
 import com.android.systemui.keyguard.WakefulnessLifecycle;
+import com.android.systemui.navigation.Navigator;
 import com.android.systemui.plugins.ActivityStarter;
 import com.android.systemui.plugins.qs.QS;
 import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper.SnoozeOption;
@@ -267,7 +275,11 @@ import java.util.Map;
 public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunable,
         DragDownHelper.DragDownCallback, ActivityStarter, OnUnlockMethodChangedListener,
         OnHeadsUpChangedListener, CommandQueue.Callbacks, ZenModeController.Callback,
-        ColorExtractor.OnColorsChangedListener, ConfigurationListener, NotificationPresenter {
+        ColorExtractor.OnColorsChangedListener, ConfigurationListener, NotificationPresenter,
+        OnHeadsUpChangedListener, VisualStabilityManager,
+        ActivatableNotificationView.OnActivatedListener,
+        ExpandableNotificationRow.ExpansionLogger, NotificationData.Environment,
+        ExpandableNotificationRow.OnExpandClickListener, InflationCallback, PackageChangedListener {
     public static final boolean MULTIUSER_DEBUG = false;
 
     public static final boolean ENABLE_CHILD_NOTIFICATIONS
@@ -501,6 +513,8 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
 
     private final DisplayMetrics mDisplayMetrics = new DisplayMetrics();
 
+    private DUPackageMonitor mPackageMonitor;
+
     // XXX: gesture research
     private final GestureRecorder mGestureRec = DEBUG_GESTURES
         ? new GestureRecorder("/sdcard/statusbar_gestures.dat")
@@ -591,6 +605,77 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
             if (wallpaperManager == null) {
                 Log.w(TAG, "WallpaperManager not available");
                 return;
+    private MediaSessionManager mMediaSessionManager;
+    private MediaController mMediaController;
+    private String mMediaNotificationKey;
+    private MediaMetadata mMediaMetadata;
+    private MediaController.Callback mMediaListener
+            = new MediaController.Callback() {
+        @Override
+        public void onPlaybackStateChanged(PlaybackState state) {
+            super.onPlaybackStateChanged(state);
+            if (DEBUG_MEDIA) Log.v(TAG, "DEBUG_MEDIA: onPlaybackStateChanged: " + state);
+            if (state != null) {
+                if (!isPlaybackActive(state.getState())) {
+                    clearCurrentMediaNotification();
+                    updateMediaMetaData(true, true);
+                }
+                if (mNavigationBar != null) {
+                    setMediaPlaying();
+                }
+            }
+        }
+
+        @Override
+        public void onMetadataChanged(MediaMetadata metadata) {
+            super.onMetadataChanged(metadata);
+            if (DEBUG_MEDIA) Log.v(TAG, "DEBUG_MEDIA: onMetadataChanged: " + metadata);
+            mMediaMetadata = metadata;
+            updateMediaMetaData(true, true);
+            if (mTickerEnabled == 2) {
+                tickTrackInfo();
+            }
+            if (mNavigationBar != null) {
+                setMediaPlaying();
+            }
+        }
+
+        @Override
+        public void onSessionDestroyed() {
+            super.onSessionDestroyed();
+            if (mNavigationBar != null) {
+                setMediaPlaying();
+            }
+        }
+    };
+
+    public void setMediaPlaying() {
+        if (mNavigationBar != null) {
+            if (PlaybackState.STATE_PLAYING ==
+                    getMediaControllerPlaybackState(mMediaController)
+                    || PlaybackState.STATE_BUFFERING ==
+                    getMediaControllerPlaybackState(mMediaController)) {
+                mNavigationBar.setMediaPlaying(true);
+            } else {
+                mNavigationBar.setMediaPlaying(false);
+            }
+        }
+    }
+
+    private void tickTrackInfo() {
+        ArrayList<Entry> activeNotifications = mNotificationData.getActiveNotifications();
+        int N = activeNotifications.size();
+        if (PlaybackState.STATE_PLAYING ==
+                getMediaControllerPlaybackState(mMediaController)
+                || PlaybackState.STATE_BUFFERING ==
+                getMediaControllerPlaybackState(mMediaController)) {
+            final String pkg = mMediaController.getPackageName();
+            for (int i = 0; i < N; i++) {
+                final Entry entry = activeNotifications.get(i);
+                if (entry.notification.getPackageName().equals(pkg)) {
+                    tick(entry.notification, true, true, mMediaMetadata);
+                    break;
+                }
             }
             WallpaperInfo info = wallpaperManager.getWallpaperInfo();
             final boolean supportsAmbientMode = info != null &&
@@ -747,6 +832,11 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
 
         mDisplay = mWindowManager.getDefaultDisplay();
+
+        mPackageMonitor = new DUPackageMonitor();
+        mPackageMonitor.register(mContext, mHandler);
+        mPackageMonitor.addListener(this);
+
         updateDisplaySize();
 
         Resources res = mContext.getResources();
@@ -770,6 +860,9 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         mPowerManager = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
 
         mDeviceProvisionedController = Dependency.get(DeviceProvisionedController.class);
+
+        mContext.getContentResolver().registerContentObserver(Settings.Secure.getUriFor(
+                Settings.Secure.NAVIGATION_BAR_VISIBLE), false, mNavbarObserver, UserHandle.USER_ALL);
 
         mBarService = IStatusBarService.Stub.asInterface(
                 ServiceManager.getService(Context.STATUS_BAR_SERVICE));
@@ -973,6 +1066,10 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         boolean showNav = LineageSettings.System.getIntForUser(mContext.getContentResolver(),
                 LineageSettings.System.FORCE_SHOW_NAVBAR,
                 Utils.hasNavbarByDefault(mContext) ? 1 : 0, UserHandle.USER_CURRENT) != 0;
+
+        boolean showNav = Settings.Secure.getInt(mContext.getContentResolver(),
+                Settings.Secure.NAVIGATION_BAR_VISIBLE,
+                DUActionUtils.hasNavbarByDefault(mContext) ? 1 : 0) != 0;
         if (DEBUG)
             Log.v(TAG, "hasNavigationBar=" + showNav);
         if (showNav) {
@@ -1174,6 +1271,10 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
             if (mLightBarController != null) {
                 mNavigationBar.setLightBarController(mLightBarController);
             }
+            if (!mNavigationBar.isUsingStockNav()) {
+                ((NavigationBarFrame)mNavigationBarView).disableDeadZone();
+                setMediaPlaying();
+            }
             mNavigationBar.setCurrentSysuiVisibility(mSystemUiVisibility);
         });
     }
@@ -1189,6 +1290,14 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
                 mNavigationBar = null;
             }
             mNavigationBarView = null;
+        if (mNavigationBar != null && mNavigationBarView != null) {
+            FragmentHostManager fragmentHost = FragmentHostManager.get(mNavigationBarView);
+            if (mNavigationBarView.isAttachedToWindow()) {
+                mWindowManager.removeViewImmediate(mNavigationBarView);
+                mNavigationBarView = null;
+            }
+            fragmentHost.getFragmentManager().beginTransaction().remove(mNavigationBar).commit();
+            mNavigationBar = null;
         }
     }
 
@@ -1704,6 +1813,138 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         }
 
         mMediaManager.findAndUpdateMediaNotifications();
+        findAndUpdateMediaNotifications();
+    }
+
+    public void findAndUpdateMediaNotifications() {
+        boolean metaDataChanged = false;
+
+        synchronized (mNotificationData) {
+            ArrayList<Entry> activeNotifications = mNotificationData.getActiveNotifications();
+            final int N = activeNotifications.size();
+
+            // Promote the media notification with a controller in 'playing' state, if any.
+            Entry mediaNotification = null;
+            MediaController controller = null;
+            for (int i = 0; i < N; i++) {
+                final Entry entry = activeNotifications.get(i);
+                if (isMediaNotification(entry)) {
+                    final MediaSession.Token token =
+                            entry.notification.getNotification().extras
+                            .getParcelable(Notification.EXTRA_MEDIA_SESSION);
+                    if (token != null) {
+                        MediaController aController = new MediaController(mContext, token);
+                        if (PlaybackState.STATE_PLAYING ==
+                                getMediaControllerPlaybackState(aController)) {
+                            if (DEBUG_MEDIA) {
+                                Log.v(TAG, "DEBUG_MEDIA: found mediastyle controller matching "
+                                        + entry.notification.getKey());
+                            }
+                            mediaNotification = entry;
+                            controller = aController;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (mediaNotification == null) {
+                // Still nothing? OK, let's just look for live media sessions and see if they match
+                // one of our notifications. This will catch apps that aren't (yet!) using media
+                // notifications.
+
+                if (mMediaSessionManager != null) {
+                    final List<MediaController> sessions
+                            = mMediaSessionManager.getActiveSessionsForUser(
+                                    null,
+                                    UserHandle.USER_ALL);
+
+                    for (MediaController aController : sessions) {
+                        if (PlaybackState.STATE_PLAYING ==
+                                getMediaControllerPlaybackState(aController)) {
+                            // now to see if we have one like this
+                            final String pkg = aController.getPackageName();
+
+                            for (int i = 0; i < N; i++) {
+                                final Entry entry = activeNotifications.get(i);
+                                if (entry.notification.getPackageName().equals(pkg)) {
+                                    if (DEBUG_MEDIA) {
+                                        Log.v(TAG, "DEBUG_MEDIA: found controller matching "
+                                            + entry.notification.getKey());
+                                    }
+                                    controller = aController;
+                                    mediaNotification = entry;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (controller != null && !sameSessions(mMediaController, controller)) {
+                // We have a new media session
+                clearCurrentMediaNotification();
+                mMediaController = controller;
+                mMediaController.registerCallback(mMediaListener);
+                if (mNavigationBar != null) {
+                    setMediaPlaying();
+                }
+                mMediaMetadata = mMediaController.getMetadata();
+                if (DEBUG_MEDIA) {
+                    Log.v(TAG, "DEBUG_MEDIA: insert listener, receive metadata: "
+                            + mMediaMetadata);
+                }
+
+                if (mediaNotification != null) {
+                    mMediaNotificationKey = mediaNotification.notification.getKey();
+                    if (DEBUG_MEDIA) {
+                        Log.v(TAG, "DEBUG_MEDIA: Found new media notification: key="
+                                + mMediaNotificationKey + " controller=" + mMediaController);
+                    }
+                }
+                metaDataChanged = true;
+            }
+        }
+
+        if (metaDataChanged) {
+            updateNotifications();
+        }
+        updateMediaMetaData(metaDataChanged, true);
+    }
+
+    private int getMediaControllerPlaybackState(MediaController controller) {
+        if (controller != null) {
+            final PlaybackState playbackState = controller.getPlaybackState();
+            if (playbackState != null) {
+                return playbackState.getState();
+            }
+        }
+        return PlaybackState.STATE_NONE;
+    }
+
+    private boolean isPlaybackActive(int state) {
+        if (state != PlaybackState.STATE_STOPPED
+                && state != PlaybackState.STATE_ERROR
+                && state != PlaybackState.STATE_NONE) {
+            return true;
+        }
+        return false;
+    }
+
+    private void clearCurrentMediaNotification() {
+        mMediaNotificationKey = null;
+        mMediaMetadata = null;
+        if (mMediaController != null) {
+            if (DEBUG_MEDIA) {
+                Log.v(TAG, "DEBUG_MEDIA: Disconnecting from old controller: "
+                        + mMediaController.getPackageName());
+            }
+            mMediaController.unregisterCallback(mMediaListener);
+            if (mNavigationBar != null) {
+                setMediaPlaying();
+            }
+        }
+        mMediaController = null;
     }
 
 
@@ -2194,6 +2435,18 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
 
         if (!isExpanded) {
             mRemoteInputManager.removeRemoteInputEntriesKeptUntilCollapsed();
+            removeRemoteInputEntriesKeptUntilCollapsed();
+        }
+        if (mNavigationBar != null) {
+            mNavigationBar.setPanelExpanded(isExpanded);
+        }
+    }
+
+    private void removeRemoteInputEntriesKeptUntilCollapsed() {
+        for (int i = 0; i < mRemoteInputEntriesToRemoveOnCollapse.size(); i++) {
+            Entry entry = mRemoteInputEntriesToRemoveOnCollapse.valueAt(i);
+            mRemoteInputController.removeRemoteInput(entry, null);
+            removeNotification(entry.key, mLatestRankingMap);
         }
     }
 
@@ -2825,6 +3078,12 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
             // workspace
             WirelessChargingAnimation.makeWirelessChargingAnimation(mContext, null,
                     batteryLevel, null, false).show();
+
+    public void toggleFlashlight() {
+        if (mFlashlightController != null
+                && mFlashlightController.hasFlashlight()
+                && mFlashlightController.isAvailable()) {
+            mFlashlightController.setFlashlight(!mFlashlightController.isEnabled());
         }
     }
 
@@ -3693,11 +3952,40 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
         if (mQSPanel != null && mQSPanel.getHost() != null) {
             mQSPanel.getHost().destroy();
         }
+
+        mPackageMonitor.removeListener(this);
+        mPackageMonitor.unregister();
+
         Dependency.get(ActivityStarterDelegate.class).setActivityStarterImpl(null);
         mDeviceProvisionedController.removeCallback(mUserSetupObserver);
         Dependency.get(ConfigurationController.class).removeCallback(this);
         mZenController.removeCallback(this);
         mAppOpsListener.destroy();
+    }
+
+    @Override
+    public void onPackageChanged(String pkg, PackageState state) {
+        if (state == PackageState.PACKAGE_REMOVED
+                || state == PackageState.PACKAGE_CHANGED) {
+            final Context ctx = mContext;
+            final Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    if (!DUActionUtils.hasNavbarByDefault(ctx)) {
+                        DUActionUtils.resolveAndUpdateButtonActions(ctx,
+                                ActionConstants
+                                        .getDefaults(ActionConstants.HWKEYS));
+                    }
+                    DUActionUtils
+                            .resolveAndUpdateButtonActions(ctx, ActionConstants
+                                    .getDefaults(ActionConstants.SMARTBAR));
+                    DUActionUtils.resolveAndUpdateButtonActions(ctx,
+                            ActionConstants.getDefaults(ActionConstants.FLING));
+                }
+            });
+            thread.setPriority(Process.THREAD_PRIORITY_BACKGROUND);
+            thread.start();
+        }
     }
 
     private boolean mDemoModeAllowed;
@@ -4494,6 +4782,10 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
      */
     public KeyguardBottomAreaView getKeyguardBottomAreaView() {
         return mNotificationPanel.getKeyguardBottomAreaView();
+    // TODO: Figure out way to remove this.
+    // We can't remove you yet but we can make you more abstract ;D
+    public Navigator getNavigationBarView() {
+        return mNavigationBar != null ? mNavigationBar.getNavigator() : null;
     }
 
     // ---------------------- DragDownHelper.OnDragDownListener ------------------------------------
@@ -5659,6 +5951,26 @@ public class StatusBar extends SystemUI implements DemoMode, TunerService.Tunabl
     void awakenDreams() {
         SystemServicesProxy.getInstance(mContext).awakenDreamsAsync();
     }
+    protected final ContentObserver mNavbarObserver = new ContentObserver(mHandler) {
+        @Override
+        public void onChange(boolean selfChange) {
+            boolean showing = Settings.Secure.getInt(mContext.getContentResolver(),
+                    Settings.Secure.NAVIGATION_BAR_VISIBLE,
+                    DUActionUtils.hasNavbarByDefault(mContext) ? 1 : 0) != 0;
+            if (!showing && mNavigationBar != null && mNavigationBarView != null) {
+                removeNavigationBar();
+            } else if (showing && mNavigationBar == null && mNavigationBarView == null) {
+                createNavigationBar();
+            }
+            if (!DUActionUtils.hasNavbarByDefault(mContext)) {
+                Intent intent = new Intent("com.cyanogenmod.action.UserChanged");
+                intent.setPackage("com.android.settings");
+                mContext.sendBroadcastAsUser(intent, new UserHandle(UserHandle.USER_CURRENT));
+            }
+        }
+    };
+
+    private RemoteViews.OnClickHandler mOnClickHandler = new RemoteViews.OnClickHandler() {
 
     @Override
     public void preloadRecentApps() {

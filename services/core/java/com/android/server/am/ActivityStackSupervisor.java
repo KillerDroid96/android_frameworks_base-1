@@ -4735,9 +4735,421 @@ public class ActivityStackSupervisor extends ConfigurationContainer implements D
                         }
                     }
                 } break;
+                case LOCK_TASK_START_MSG: {
+                    // When lock task starts, we disable the status bars.
+                    try {
+                        if (mLockTaskNotify == null) {
+                            mLockTaskNotify = new LockTaskNotify(mService.mContext);
+                        }
+                        mLockTaskNotify.show(true);
+                        mLockTaskModeState = msg.arg2;
+                        if (getStatusBarService() != null) {
+                            int flags = 0;
+                            if (mLockTaskModeState == LOCK_TASK_MODE_LOCKED) {
+                                flags = StatusBarManager.DISABLE_MASK
+                                        & (~StatusBarManager.DISABLE_BACK);
+                            } else if (mLockTaskModeState == LOCK_TASK_MODE_PINNED) {
+                                flags = StatusBarManager.DISABLE_MASK
+                                        & (~StatusBarManager.DISABLE_BACK)
+                                        & (~StatusBarManager.DISABLE_HOME)
+                                        & (~StatusBarManager.DISABLE_RECENT);
+                            }
+                            getStatusBarService().disable(flags, mToken,
+                                    mService.mContext.getPackageName());
+                            getStatusBarService().screenPinningStateChanged(true);
+                        }
+                        mWindowManager.disableKeyguard(mToken, LOCK_TASK_TAG);
+                        if (getDevicePolicyManager() != null) {
+                            getDevicePolicyManager().notifyLockTaskModeChanged(true,
+                                    (String)msg.obj, msg.arg1);
+                        }
+                    } catch (RemoteException ex) {
+                        throw new RuntimeException(ex);
+                    }
+                } break;
+                case LOCK_TASK_END_MSG: {
+                    // When lock task ends, we enable the status bars.
+                    try {
+                        if (getStatusBarService() != null) {
+                            getStatusBarService().disable(StatusBarManager.DISABLE_NONE, mToken,
+                                    mService.mContext.getPackageName());
+                            getStatusBarService().screenPinningStateChanged(false);
+                        }
+                        mWindowManager.reenableKeyguard(mToken);
+                        if (getDevicePolicyManager() != null) {
+                            getDevicePolicyManager().notifyLockTaskModeChanged(false, null,
+                                    msg.arg1);
+                        }
+                        if (mLockTaskNotify == null) {
+                            mLockTaskNotify = new LockTaskNotify(mService.mContext);
+                        }
+                        mLockTaskNotify.show(false);
+                        try {
+                            boolean shouldLockKeyguard = Settings.Secure.getInt(
+                                    mService.mContext.getContentResolver(),
+                                    Settings.Secure.LOCK_TO_APP_EXIT_LOCKED) != 0;
+                            if (mLockTaskModeState == LOCK_TASK_MODE_PINNED && shouldLockKeyguard) {
+                                mWindowManager.lockNow(null);
+                                mWindowManager.dismissKeyguard(null /* callback */);
+                                new LockPatternUtils(mService.mContext)
+                                        .requireCredentialEntry(UserHandle.USER_ALL);
+                            }
+                        } catch (SettingNotFoundException e) {
+                            // No setting, don't lock.
+                        }
+                    } catch (RemoteException ex) {
+                        throw new RuntimeException(ex);
+                    } finally {
+                        mLockTaskModeState = LOCK_TASK_MODE_NONE;
+                    }
+                } break;
+                case SHOW_LOCK_TASK_ESCAPE_MESSAGE_MSG: {
+                    if (mLockTaskNotify == null) {
+                        mLockTaskNotify = new LockTaskNotify(mService.mContext);
+                    }
+                    mLockTaskNotify.showToast(LOCK_TASK_MODE_PINNED);
+                } break;
+                case CONTAINER_CALLBACK_TASK_LIST_EMPTY: {
+                    final ActivityContainer container = (ActivityContainer) msg.obj;
+                    final IActivityContainerCallback callback = container.mCallback;
+                    if (callback != null) {
+                        try {
+                            callback.onAllActivitiesComplete(container.asBinder());
+                        } catch (RemoteException e) {
+                        }
+                    }
+                } break;
+                case LAUNCH_TASK_BEHIND_COMPLETE: {
+                    synchronized (mService) {
+                        ActivityRecord r = ActivityRecord.forTokenLocked((IBinder) msg.obj);
+                        if (r != null) {
+                            handleLaunchTaskBehindCompleteLocked(r);
+                        }
+                    }
+                } break;
 
             }
         }
+    }
+
+    class ActivityContainer extends android.app.IActivityContainer.Stub {
+        final static int FORCE_NEW_TASK_FLAGS = FLAG_ACTIVITY_NEW_TASK |
+                FLAG_ACTIVITY_MULTIPLE_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION;
+        final int mStackId;
+        IActivityContainerCallback mCallback = null;
+        ActivityStack mStack;
+        ActivityRecord mParentActivity = null;
+        String mIdString;
+
+        boolean mVisible = true;
+
+        /** Display this ActivityStack is currently on. Null if not attached to a Display. */
+        ActivityDisplay mActivityDisplay;
+
+        final static int CONTAINER_STATE_HAS_SURFACE = 0;
+        final static int CONTAINER_STATE_NO_SURFACE = 1;
+        final static int CONTAINER_STATE_FINISHING = 2;
+        int mContainerState = CONTAINER_STATE_HAS_SURFACE;
+
+        ActivityContainer(int stackId, ActivityDisplay activityDisplay, boolean onTop) {
+            synchronized (mService) {
+                mStackId = stackId;
+                mActivityDisplay = activityDisplay;
+                mIdString = "ActivtyContainer{" + mStackId + "}";
+
+                createStack(stackId, onTop);
+                if (DEBUG_STACK) Slog.d(TAG_STACK, "Creating " + this);
+            }
+        }
+
+        protected void createStack(int stackId, boolean onTop) {
+            switch (stackId) {
+                case PINNED_STACK_ID:
+                    new PinnedActivityStack(this, mRecentTasks, onTop);
+                    break;
+                default:
+                    new ActivityStack(this, mRecentTasks, onTop);
+                    break;
+            }
+        }
+
+        /**
+         * Adds the stack to specified display. Also calls WindowManager to do the same from
+         * {@link ActivityStack#reparent(ActivityDisplay, boolean)}.
+         * @param activityDisplay The display to add the stack to.
+         */
+        void addToDisplayLocked(ActivityDisplay activityDisplay) {
+            if (DEBUG_STACK) Slog.d(TAG_STACK, "addToDisplayLocked: " + this
+                    + " to display=" + activityDisplay);
+            if (mActivityDisplay != null) {
+                throw new IllegalStateException("ActivityContainer is already attached, " +
+                        "displayId=" + mActivityDisplay.mDisplayId);
+            }
+            mActivityDisplay = activityDisplay;
+            mStack.reparent(activityDisplay, true /* onTop */);
+        }
+
+        @Override
+        public void addToDisplay(int displayId) {
+            synchronized (mService) {
+                final ActivityDisplay activityDisplay = getActivityDisplayOrCreateLocked(displayId);
+                if (activityDisplay == null) {
+                    return;
+                }
+                addToDisplayLocked(activityDisplay);
+            }
+        }
+
+        @Override
+        public int getDisplayId() {
+            synchronized (mService) {
+                if (mActivityDisplay != null) {
+                    return mActivityDisplay.mDisplayId;
+                }
+            }
+            return -1;
+        }
+
+        @Override
+        public int getStackId() {
+            synchronized (mService) {
+                return mStackId;
+            }
+        }
+
+        @Override
+        public boolean injectEvent(InputEvent event) {
+            final long origId = Binder.clearCallingIdentity();
+            try {
+                synchronized (mService) {
+                    if (mActivityDisplay != null) {
+                        return mInputManagerInternal.injectInputEvent(event,
+                                mActivityDisplay.mDisplayId,
+                                InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+                    }
+                }
+                return false;
+            } finally {
+                Binder.restoreCallingIdentity(origId);
+            }
+        }
+
+        @Override
+        public void release() {
+            synchronized (mService) {
+                if (mContainerState == CONTAINER_STATE_FINISHING) {
+                    return;
+                }
+                mContainerState = CONTAINER_STATE_FINISHING;
+
+                long origId = Binder.clearCallingIdentity();
+                try {
+                    mStack.finishAllActivitiesLocked(false);
+                    mService.mActivityStarter.removePendingActivityLaunchesLocked(mStack);
+                } finally {
+                    Binder.restoreCallingIdentity(origId);
+                }
+            }
+        }
+
+        /**
+         * Remove the stack completely. Must be called only when there are no tasks left in it,
+         * as this method does not finish running activities.
+         */
+        void removeLocked() {
+            if (DEBUG_STACK) Slog.d(TAG_STACK, "removeLocked: " + this + " from display="
+                    + mActivityDisplay + " Callers=" + Debug.getCallers(2));
+            if (mActivityDisplay != null) {
+                removeFromDisplayLocked();
+            }
+            mStack.remove();
+        }
+
+        /**
+         * Remove the stack from its current {@link ActivityDisplay}, so it can be either destroyed
+         * completely or re-parented.
+         */
+        private void removeFromDisplayLocked() {
+            if (DEBUG_STACK) Slog.d(TAG_STACK, "removeFromDisplayLocked: " + this
+                    + " current displayId=" + mActivityDisplay.mDisplayId);
+
+            mActivityDisplay.detachStack(mStack);
+            mActivityDisplay = null;
+        }
+
+        /**
+         * Move the stack to specified display.
+         * @param activityDisplay Target display to move the stack to.
+         * @param onTop Indicates whether container should be place on top or on bottom.
+         */
+        void moveToDisplayLocked(ActivityDisplay activityDisplay, boolean onTop) {
+            if (DEBUG_STACK) Slog.d(TAG_STACK, "moveToDisplayLocked: " + this + " from display="
+                    + mActivityDisplay + " to display=" + activityDisplay
+                    + " Callers=" + Debug.getCallers(2));
+
+            removeFromDisplayLocked();
+
+            mActivityDisplay = activityDisplay;
+            mStack.reparent(activityDisplay, onTop);
+        }
+
+        @Override
+        public final int startActivity(Intent intent) {
+            return mService.startActivity(intent, this);
+        }
+
+        @Override
+        public final int startActivityIntentSender(IIntentSender intentSender)
+                throws TransactionTooLargeException {
+            mService.enforceNotIsolatedCaller("ActivityContainer.startActivityIntentSender");
+
+            if (!(intentSender instanceof PendingIntentRecord)) {
+                throw new IllegalArgumentException("Bad PendingIntent object");
+            }
+
+            final int userId = mService.mUserController.handleIncomingUser(Binder.getCallingPid(),
+                    Binder.getCallingUid(), mCurrentUser, false,
+                    ActivityManagerService.ALLOW_FULL_ONLY, "ActivityContainer", null);
+
+            final PendingIntentRecord pendingIntent = (PendingIntentRecord) intentSender;
+            checkEmbeddedAllowedInner(userId, pendingIntent.key.requestIntent,
+                    pendingIntent.key.requestResolvedType);
+
+            return pendingIntent.sendInner(0, null, null, null, null, null, null, null, 0,
+                    FORCE_NEW_TASK_FLAGS, FORCE_NEW_TASK_FLAGS, null, this);
+        }
+
+        void checkEmbeddedAllowedInner(int userId, Intent intent, String resolvedType) {
+            ActivityInfo aInfo = resolveActivity(intent, resolvedType, 0, null, userId);
+            if (aInfo != null && (aInfo.flags & ActivityInfo.FLAG_ALLOW_EMBEDDED) == 0) {
+                throw new SecurityException(
+                        "Attempt to embed activity that has not set allowEmbedded=\"true\"");
+            }
+        }
+
+        @Override
+        public IBinder asBinder() {
+            return this;
+        }
+
+        @Override
+        public void setSurface(Surface surface, int width, int height, int density) {
+            mService.enforceNotIsolatedCaller("ActivityContainer.attachToSurface");
+        }
+
+        ActivityStackSupervisor getOuter() {
+            return ActivityStackSupervisor.this;
+        }
+
+        boolean isAttachedLocked() {
+            return mActivityDisplay != null;
+        }
+
+        // TODO: Make sure every change to ActivityRecord.visible results in a call to this.
+        void setVisible(boolean visible) {
+            if (mVisible != visible) {
+                mVisible = visible;
+                if (mCallback != null) {
+                    mHandler.obtainMessage(CONTAINER_CALLBACK_VISIBILITY, visible ? 1 : 0,
+                            0 /* unused */, this).sendToTarget();
+                }
+            }
+        }
+
+        void setDrawn() {
+        }
+
+        // You can always start a new task on a regular ActivityStack.
+        boolean isEligibleForNewTasks() {
+            return true;
+        }
+
+        void onTaskListEmptyLocked() {
+            removeLocked();
+            mHandler.obtainMessage(CONTAINER_CALLBACK_TASK_LIST_EMPTY, this).sendToTarget();
+        }
+
+        @Override
+        public String toString() {
+            return mIdString + (mActivityDisplay == null ? "N" : "A");
+        }
+    }
+
+    private class VirtualActivityContainer extends ActivityContainer {
+        Surface mSurface;
+        boolean mDrawn = false;
+
+        VirtualActivityContainer(ActivityRecord parent, IActivityContainerCallback callback) {
+            super(getNextStackId(), parent.getStack().mActivityContainer.mActivityDisplay,
+                    true /* onTop */);
+            mParentActivity = parent;
+            mCallback = callback;
+            mContainerState = CONTAINER_STATE_NO_SURFACE;
+            mIdString = "VirtualActivityContainer{" + mStackId + ", parent=" + mParentActivity + "}";
+        }
+
+        @Override
+        public void setSurface(Surface surface, int width, int height, int density) {
+            super.setSurface(surface, width, height, density);
+
+            synchronized (mService) {
+                final long origId = Binder.clearCallingIdentity();
+                try {
+                    setSurfaceLocked(surface, width, height, density);
+                } finally {
+                    Binder.restoreCallingIdentity(origId);
+                }
+            }
+        }
+
+        private void setSurfaceLocked(Surface surface, int width, int height, int density) {
+            if (mContainerState == CONTAINER_STATE_FINISHING) {
+                return;
+            }
+            VirtualActivityDisplay virtualActivityDisplay =
+                    (VirtualActivityDisplay) mActivityDisplay;
+            if (virtualActivityDisplay == null) {
+                virtualActivityDisplay =
+                        new VirtualActivityDisplay(width, height, density);
+                mActivityDisplay = virtualActivityDisplay;
+                mActivityDisplays.put(virtualActivityDisplay.mDisplayId, virtualActivityDisplay);
+                addToDisplayLocked(virtualActivityDisplay);
+            }
+
+            if (mSurface != null) {
+                mSurface.release();
+            }
+
+            mSurface = surface;
+            if (surface != null) {
+                resumeFocusedStackTopActivityLocked();
+            } else {
+                mContainerState = CONTAINER_STATE_NO_SURFACE;
+                ((VirtualActivityDisplay) mActivityDisplay).setSurface(null);
+                if (mStack.mPausingActivity == null && mStack.mResumedActivity != null) {
+                    mStack.startPausingLocked(false, true, null, false);
+                }
+            }
+
+            setSurfaceIfReadyLocked();
+
+            if (DEBUG_STACK) Slog.d(TAG_STACK,
+                    "setSurface: " + this + " to display=" + virtualActivityDisplay);
+        }
+
+        @Override
+        boolean isAttachedLocked() {
+            return mSurface != null && super.isAttachedLocked();
+        }
+
+        @Override
+        void setDrawn() {
+            synchronized (mService) {
+                mDrawn = true;
+                setSurfaceIfReadyLocked();
+            }
+        }
+        
     }
 
     ActivityStack findStackBehind(ActivityStack stack) {

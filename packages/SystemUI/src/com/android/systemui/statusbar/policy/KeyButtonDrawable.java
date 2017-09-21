@@ -16,6 +16,8 @@
 
 package com.android.systemui.statusbar.policy;
 
+import com.android.systemui.navigation.DarkIntensity;
+
 import android.annotation.Nullable;
 import android.content.Context;
 import android.content.res.Resources;
@@ -31,7 +33,7 @@ import com.android.systemui.statusbar.phone.ShadowKeyDrawable;
  * Drawable for {@link KeyButtonView}s which contains an asset for both normal mode and light
  * navigation bar mode.
  */
-public class KeyButtonDrawable extends LayerDrawable {
+public class KeyButtonDrawable extends LayerDrawable implements DarkIntensity {
 
     private final boolean mHasDarkDrawable;
 
@@ -66,6 +68,7 @@ public class KeyButtonDrawable extends LayerDrawable {
         setDarkIntensity(0f);
     }
 
+    @Override
     public void setDarkIntensity(float intensity) {
         if (!mHasDarkDrawable) {
             return;

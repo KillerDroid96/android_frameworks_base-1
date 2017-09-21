@@ -64,6 +64,7 @@ import com.android.systemui.OverviewProxyService;
 import com.android.systemui.R;
 import com.android.systemui.RecentsComponent;
 import com.android.systemui.SysUiServiceProvider;
+import com.android.systemui.navigation.Navigator;
 import com.android.systemui.plugins.PluginListener;
 import com.android.systemui.plugins.PluginManager;
 import com.android.systemui.plugins.statusbar.phone.NavGesture;
@@ -93,6 +94,8 @@ import static com.android.systemui.shared.system.NavigationBarCompat.HIT_TARGET_
 
 public class NavigationBarView extends FrameLayout implements PluginListener<NavGesture>,
         TunerService.Tunable {
+
+public class NavigationBarView extends FrameLayout implements Navigator {
     final static boolean DEBUG = false;
     final static String TAG = "StatusBar/NavBarView";
 
@@ -1259,8 +1262,9 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         pw.println();
     }
 
-    public interface OnVerticalChangedListener {
-        void onVerticalChanged(boolean isVertical);
+    @Override
+    public View getBaseView() {
+        return this;
     }
 
     public void updateDpadKeys() {
@@ -1275,4 +1279,9 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         mDockedStackExists = exists;
         updateRecentsIcon();
     });
+
+    @Override
+    public void dispose() {
+        removeAllViews();
+    }
 }
