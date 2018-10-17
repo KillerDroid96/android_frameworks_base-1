@@ -4173,6 +4173,13 @@ public final class Settings {
                 "double_tap_sleep_lockscreen";
 
         /**
+         * Select from various styles to use on the QS tiles
+         *
+         * @hide
+         */
+        public static final String QS_TILE_STYLE = "qs_tile_style";
+
+        /**
          * Enable/Disable screenshot sound
          * @hide
          */
@@ -4936,6 +4943,7 @@ public final class Settings {
             PRIVATE_SETTINGS.add(LOCK_TO_APP_ENABLED);
             PRIVATE_SETTINGS.add(EGG_MODE);
             PRIVATE_SETTINGS.add(DISPLAY_COLOR_MODE);
+            PRIVATE_SETTINGS.add(QS_TILE_STYLE);
         }
 
         /**

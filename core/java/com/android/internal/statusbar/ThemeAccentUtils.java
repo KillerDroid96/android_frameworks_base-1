@@ -82,6 +82,28 @@ public class ThemeAccentUtils {
         "com.accents.userseven", // 28
     };
 
+        private static final String[] QS_TILE_THEMES = {
+        "com.android.systemui.qstile.default", // 0
+        "com.android.systemui.qstile.circlegradient", // 1
+        "com.android.systemui.qstile.circletrim", // 2
+        "com.android.systemui.qstile.dottedcircle", // 3
+        "com.android.systemui.qstile.dualtonecircle", // 4
+        "com.android.systemui.qstile.dualtonecircletrim", // 5
+        "com.android.systemui.qstile.ink", // 6
+        "com.android.systemui.qstile.inkdrop", // 7
+        "com.android.systemui.qstile.mountain", // 8
+        "com.android.systemui.qstile.ninja", // 9
+        "com.android.systemui.qstile.oreo", // 10
+        "com.android.systemui.qstile.oreocircletrim", // 11
+        "com.android.systemui.qstile.oreosquircletrim", // 12
+        "com.android.systemui.qstile.pokesign", // 13
+        "com.android.systemui.qstile.squaremedo", // 14
+        "com.android.systemui.qstile.squircle", // 15
+        "com.android.systemui.qstile.squircletrim", // 16
+        "com.android.systemui.qstile.teardrop", // 17
+        "com.android.systemui.qstile.wavey", // 18
+    };
+
     // Unloads the stock dark theme
     private static void unloadStockDarkTheme(IOverlayManager om, int userId) {
         OverlayInfo themeInfo = null;
@@ -313,5 +335,44 @@ public class ThemeAccentUtils {
                 e.printStackTrace();
             }
         }
+    }
+
+    // Switches qs tile style to user selected.
+    public static void updateTileStyle(IOverlayManager om, int userId, int qsTileStyle) {
+        if (qsTileStyle == 0) {
+            stockTileStyle(om, userId);
+        } else {
+            try {
+                om.setEnabled(QS_TILE_THEMES[qsTileStyle],
+                        true, userId);
+            } catch (RemoteException e) {
+            }
+        }
+    }
+    
+    // Switches qs tile style back to stock.
+    public static void stockTileStyle(IOverlayManager om, int userId) {
+        // skip index 0
+        for (int i = 1; i < QS_TILE_THEMES.length; i++) {
+            String qstiletheme = QS_TILE_THEMES[i];
+            try {
+                om.setEnabled(qstiletheme,
+                        false /*disable*/, userId);
+            } catch (RemoteException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    // Check for any QS tile styles overlay
+    public static boolean isUsingQsTileStyles(IOverlayManager om, int userId, int qsstyle) {
+        OverlayInfo themeInfo = null;
+        try {
+            themeInfo = om.getOverlayInfo(QS_TILE_THEMES[qsstyle],
+                    userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return themeInfo != null && themeInfo.isEnabled();
     }
 }
