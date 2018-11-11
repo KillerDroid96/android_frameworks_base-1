@@ -4180,6 +4180,11 @@ public final class Settings {
         public static final String QS_TILE_STYLE = "qs_tile_style";
 
         /**
+         * @hide
+         */
+        public static final String QS_HEADER_STYLE = "qs_header_style";
+
+        /**
          * Enable/Disable screenshot sound
          * @hide
          */
@@ -4719,13 +4724,13 @@ public final class Settings {
          */
         public static final String BERRY_NOTIFICATION_STYLE = "berry_notification_style";
 
-	 /**
+     /**
          * Hold current font name and name of the originating package Uses "|" as a delimiter
          * @hide
          */
         public static final String FONT_INFO = "font_info";
         
-	 /**
+     /**
          * Hold list of installed font provider packages. Uses "|" as a delimiter
          * @hide
          */
@@ -4944,6 +4949,7 @@ public final class Settings {
             PRIVATE_SETTINGS.add(EGG_MODE);
             PRIVATE_SETTINGS.add(DISPLAY_COLOR_MODE);
             PRIVATE_SETTINGS.add(QS_TILE_STYLE);
+            PRIVATE_SETTINGS.add(QS_HEADER_STYLE);
         }
 
         /**
